@@ -87,7 +87,7 @@ def send_mic_audio_to_websocket(ws):
 
 
 # Function to handle audio playback callback
-def spkr_callback(in_data, frame_count, time_info, status):
+def speaker_callback(in_data, frame_count, time_info, status):
     global audio_buffer, mic_on_at
 
     bytes_needed = frame_count * 2
@@ -283,8 +283,7 @@ def create_connection_with_ipv4(*args, **kwargs):
 def connect_to_openai():
     ws = None
     try:
-        # print(f'Connecting to WebSocket at {WS_URL} using proxy {socks.get_default_proxy()}')
-        ws = create_connection_with_ipv4(
+        ws = websocket.create_connection(
             WS_URL,
             header=[
                 f'Authorization: Bearer {API_KEY}',
@@ -337,22 +336,22 @@ def main():
         frames_per_buffer=CHUNK_SIZE
     )
 
-    spkr_stream = p.open(
+    speaker_stream = p.open(
         format=FORMAT,
         channels=1,
         rate=RATE,
         output=True,
-        stream_callback=spkr_callback,
+        stream_callback=speaker_callback,
         frames_per_buffer=CHUNK_SIZE
     )
 
     try:
         mic_stream.start_stream()
-        spkr_stream.start_stream()
+        speaker_stream.start_stream()
 
         connect_to_openai()
 
-        while mic_stream.is_active() and spkr_stream.is_active():
+        while mic_stream.is_active() and speaker_stream.is_active():
             time.sleep(0.1)
 
     except KeyboardInterrupt:
@@ -362,8 +361,8 @@ def main():
     finally:
         mic_stream.stop_stream()
         mic_stream.close()
-        spkr_stream.stop_stream()
-        spkr_stream.close()
+        speaker_stream.stop_stream()
+        speaker_stream.close()
 
         p.terminate()
         print('Audio streams stopped and resources released. Exiting.')
