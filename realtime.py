@@ -10,8 +10,8 @@ import socks
 import websocket
 
 # Set up SOCKS5 proxy
-socks.set_default_proxy(socks.SOCKS5, "127.0.0.1", 10808)
-socket.socket = socks.socksocket
+# socks.set_default_proxy(socks.SOCKS5, "127.0.0.1", 10808)
+# socket.socket = socks.socksocket
 
 # Use the provided OpenAI API key and URL
 API_KEY = os.getenv("OPENAI_API_KEY")
@@ -283,7 +283,7 @@ def create_connection_with_ipv4(*args, **kwargs):
 def connect_to_openai():
     ws = None
     try:
-        print(f'Connecting to WebSocket at {WS_URL} using proxy {socks.get_default_proxy()}')
+        # print(f'Connecting to WebSocket at {WS_URL} using proxy {socks.get_default_proxy()}')
         ws = create_connection_with_ipv4(
             WS_URL,
             header=[
