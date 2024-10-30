@@ -3,6 +3,7 @@ import json
 import os
 import queue
 import socket
+import subprocess
 import threading
 import time
 import pyaudio
@@ -10,8 +11,8 @@ import socks
 import websocket
 
 # Set up SOCKS5 proxy
-# socks.set_default_proxy(socks.SOCKS5, "127.0.0.1", 10808)
-# socket.socket = socks.socksocket
+socks.set_default_proxy(socks.SOCKS5, "127.0.0.1", 10808)
+socket.socket = socks.socksocket
 
 # Use the provided OpenAI API key and URL
 API_KEY = os.getenv("OPENAI_API_KEY")
@@ -152,20 +153,37 @@ def receive_audio_from_websocket(ws):
 # Function to handle function calls
 def handle_function_call(event_json, ws):
     try:
-        # Extract arguments from the event JSON
-        arguments = event_json.get("arguments", "{}")
-        function_call_args = json.loads(arguments)
-        city = function_call_args.get("city", "")
 
-        # Extract the call_id from the event JSON
+        name= event_json.get("name","")
         call_id = event_json.get("call_id", "")
 
-        # If the city is provided, call get_weather and send the result
-        if city:
-            weather_result = get_weather(city)
-            send_function_call_result(weather_result, call_id, ws)
-        else:
-            print("City not provided for get_weather function.")
+        arguments = event_json.get("arguments", "{}")
+        function_call_args = json.loads(arguments)
+
+
+
+        if name == "open_notepad":
+            print("start open_notepad")
+
+            subprocess.Popen(['notepad.exe'])
+            send_function_call_result("write notepad successful.", call_id, ws)
+
+            # date = function_call_args.get("date")
+            # date = function_call_args.get("date")
+        elif name  =="get_weather":
+
+            # Extract arguments from the event JSON
+            city = function_call_args.get("city", "")
+
+            # Extract the call_id from the event JSON
+
+            # If the city is provided, call get_weather and send the result
+            if city:
+                weather_result = get_weather(city)
+                # wait http response  -> send fc result to openai
+                send_function_call_result(weather_result, call_id, ws)
+            else:
+                print("City not provided for get_weather function.")
     except Exception as e:
         print(f"Error parsing function call arguments: {e}")
 
@@ -247,10 +265,30 @@ def send_fc_session_update(ws):
                         },
                         "required": ["city"]
                     }
-                }
+                },
+                    {
+                        "type": "function",
+                        "name": "open_notepad",
+                        "description": "Open my notepad.",
+                        "parameters": {
+                          "type": "object",
+                          "properties": {
+                            "content": {
+                              "type": "string",
+                              "description": "The content I want to write."
+                            },
+                             "date": {
+                              "type": "string",
+                              "description": "The date when I write."
+                            }
+                          },
+                          "required": ["content","date"]
+                        }
+                     },
             ]
         }
     }
+    # open notepad fc
 
     # Convert the session config to a JSON string
     session_config_json = json.dumps(session_config)
@@ -283,7 +321,7 @@ def create_connection_with_ipv4(*args, **kwargs):
 def connect_to_openai():
     ws = None
     try:
-        ws = websocket.create_connection(
+        ws = create_connection_with_ipv4(
             WS_URL,
             header=[
                 f'Authorization: Bearer {API_KEY}',
