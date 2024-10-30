@@ -162,14 +162,16 @@ def handle_function_call(event_json, ws):
 
 
 
-        if name == "open_notepad":
-            print("start open_notepad")
+        if name == "write_notepad":
+            print(f"start open_notepad,event_json = {event_json}")
+            content = function_call_args.get("content", "")
+            date = function_call_args.get("date", "")
 
-            subprocess.Popen(['notepad.exe'])
+            subprocess.Popen(
+                ["powershell", "-Command", f"Add-Content -Path temp.txt -Value 'date: {date}\n{content}\n\n'; notepad.exe temp.txt"])
+
             send_function_call_result("write notepad successful.", call_id, ws)
 
-            # date = function_call_args.get("date")
-            # date = function_call_args.get("date")
         elif name  =="get_weather":
 
             # Extract arguments from the event JSON
@@ -268,18 +270,18 @@ def send_fc_session_update(ws):
                 },
                     {
                         "type": "function",
-                        "name": "open_notepad",
-                        "description": "Open my notepad.",
+                        "name": "write_notepad",
+                        "description": "Open a text editor and write the time, for example, 2024-10-29 16:19. Then, write the content, which should include my questions along with your answers.",
                         "parameters": {
                           "type": "object",
                           "properties": {
                             "content": {
                               "type": "string",
-                              "description": "The content I want to write."
+                              "description": "The content consists of my questions along with the answers you provide."
                             },
                              "date": {
                               "type": "string",
-                              "description": "The date when I write."
+                              "description": "the time, for example, 2024-10-29 16:19. "
                             }
                           },
                           "required": ["content","date"]
