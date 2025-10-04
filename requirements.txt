@@ -1,3 +1,6 @@
 pyaudio
 pysocks
 websocket-client
+python-dotenv
+opencv-python
+requests
