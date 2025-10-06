@@ -10,6 +10,7 @@ import time
 import pyaudio
 import socks
 import websocket
+from websocket import WebSocketTimeoutException
 import cv2
 from dotenv import load_dotenv
 
@@ -240,6 +241,9 @@ def receive_audio_from_websocket(ws):
                         transcript = message['item']['transcript']
                         print(f'Transcript: "{transcript}"')
 
+            except WebSocketTimeoutException:
+                # Periodic timeout to allow checking stop_event without freezing
+                continue
             except Exception as e:
                 print(f'Error receiving audio: {e}')
     except Exception as e:
@@ -265,14 +269,27 @@ def handle_function_call(event_json, ws):
             content = function_call_args.get("content", "")
             date = function_call_args.get("date", "")
 
-            # Escape single quotes in content and date for PowerShell
-            content_escaped = content.replace("'", "''")
-            date_escaped = date.replace("'", "''")
+            # Only attempt to open Notepad on Windows
+            if os.name == 'nt':
+                # Escape single quotes in content and date for PowerShell
+                content_escaped = content.replace("'", "''")
+                date_escaped = date.replace("'", "''")
+                subprocess.Popen([
+                    "powershell",
+                    "-Command",
+                    f"Add-Content -Path temp.txt -Value 'date: {date_escaped}\n{content_escaped}\n\n'; notepad.exe temp.txt"
+                ])
+                result_msg = "write notepad successful."
+            else:
+                # On non-Windows, write to a local file without opening GUI
+                try:
+                    with open("temp.txt", "a", encoding="utf-8") as f:
+                        f.write(f"date: {date}\n{content}\n\n")
+                    result_msg = "content appended to temp.txt (no GUI on this OS)."
+                except Exception as e:
+                    result_msg = f"failed to write temp.txt: {e}"
 
-            subprocess.Popen(
-                ["powershell", "-Command", f"Add-Content -Path temp.txt -Value 'date: {date_escaped}\n{content_escaped}\n\n'; notepad.exe temp.txt"])
-
-            send_function_call_result("write notepad successful.", call_id, ws)
+            send_function_call_result(result_msg, call_id, ws)
 
         elif name  =="get_weather":
 
@@ -651,6 +668,8 @@ def create_connection_with_ipv4(*args, **kwargs):
 
     socket.getaddrinfo = getaddrinfo_ipv4
     try:
+        # Ensure a timeout so recv() can raise periodically
+        kwargs.setdefault('timeout', 1.0)
         return websocket.create_connection(*args, **kwargs)
     finally:
         # Restore the original getaddrinfo method after the connection
@@ -671,11 +690,23 @@ def connect_to_openai():
 
 
         # Start the recv and send threads
-        receive_thread = threading.Thread(target=receive_audio_from_websocket, args=(ws,))
+        receive_thread = threading.Thread(target=receive_audio_from_websocket, args=(ws,), daemon=True)
         receive_thread.start()
 
-        mic_thread = threading.Thread(target=send_mic_audio_to_websocket, args=(ws,))
+        mic_thread = threading.Thread(target=send_mic_audio_to_websocket, args=(ws,), daemon=True)
         mic_thread.start()
+
+        # Heartbeat thread to keep connection alive and detect stalls
+        def heartbeat():
+            while not stop_event.is_set():
+                try:
+                    ws.ping()
+                except Exception:
+                    pass
+                time.sleep(10)
+
+        hb_thread = threading.Thread(target=heartbeat, daemon=True)
+        hb_thread.start()
 
         # Wait for stop_event to be set
         while not stop_event.is_set():
@@ -685,8 +716,8 @@ def connect_to_openai():
         print('Sending WebSocket close frame.')
         ws.send_close()
 
-        receive_thread.join()
-        mic_thread.join()
+        receive_thread.join(timeout=2)
+        mic_thread.join(timeout=2)
 
         print('WebSocket closed and threads terminated.')
     except Exception as e:
