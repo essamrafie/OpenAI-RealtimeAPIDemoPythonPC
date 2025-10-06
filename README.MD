@@ -1,66 +1,76 @@
-- **Initialize Audio Interface**
+## OpenAI Realtime Voice Assistant (Python)
 
-  - Use `pyaudio.PyAudio()` to create the `p` audio interface, managing both microphone and speaker audio streams.
+Realtime voice assistant that streams microphone audio to OpenAI’s Realtime API and plays back the AI’s audio replies. Includes function-calling tools (weather, notepad, camera vision, robot wave, opening speech), stability hardening, and auto-reconnect.
 
-  **Configure Microphone and Speaker Streams**
+### How it works
 
-  - Configure 
+- Microphone audio is captured via `PyAudio` and queued; a sender thread base64-encodes chunks and sends `input_audio_buffer.append` frames over WebSocket.
+- The receiver thread processes server events:
+  - `session.created` → `send_fc_session_update()` sets instructions, voice, VAD, formats, and tools.
+  - `response.audio.delta` → decoded PCM is appended to a playback buffer; a `PyAudio` speaker callback outputs audio in realtime.
+  - `response.function_call_arguments.done` → `handle_function_call()` executes local tools and returns results via `send_function_call_result()`.
+- Tools available: `get_weather`, `write_notepad` (Windows Notepad), `describe_camera_view` (vision with `gpt-4o-mini`), `robot_wave_hello` (simulated), `opening_ceremony_speech`.
+- Stability: IPv4 WS connect with timeouts, heartbeat pings, clean shutdown, and reconnect loop.
 
-    ```
-    mic_stream
-    ```
+### Prerequisites
 
-     for microphone input and 
+- Python 3.9+ (Windows 10/11, macOS, or Linux)
+- Microphone and speakers
+- OpenAI API key with Realtime access
+- On Windows: optional camera and Notepad; on Linux/macOS: camera only
 
-    ```
-    speaker_stream
-    ```
+### Setup
 
-     for speaker output:
+1) Clone and enter the project
+```bash
+git clone https://github.com/essamrafie/OpenAI-RealtimeAPIDemoPythonPC.git
+cd OpenAI-RealtimeAPIDemoPythonPC
+```
 
-    - `mic_stream` uses `mic_callback` to capture audio frames, placing each frame in the `mic_queue` for later transmission over WebSocket.
-    - `speaker_stream` uses `speaker_callback` to retrieve audio data from `audio_buffer` for playback, handling timing and buffering of audio frames.
+2) Create and activate venv
+```bash
+python -m venv venv
+# Windows
+venv\Scripts\activate
+# macOS/Linux
+source venv/bin/activate
+```
 
-  **Start Audio Streams**
+3) Install dependencies
+```bash
+pip install -r requirements.txt
+```
 
-  - Start audio capture and playback by calling `mic_stream.start_stream()` and `speaker_stream.start_stream()`.
+4) Configure environment
+```bash
+cp env_template.txt .env  # or create .env
+echo OPENAI_API_KEY=sk-... >> .env
+```
 
-  **Establish WebSocket Connection**
+### Run
 
-  - The 
+```bash
+python realtime.py
+```
 
-    ```
-    connect_to_openai()
-    ```
+You should see logs: microphone active, connected to OpenAI, and session updates. Speak to interact. If you interrupt while it’s talking, it stops playback and listens.
 
-     function initiates a WebSocket connection with OpenAI’s API for real-time data exchange. This function spawns two threads:
+### Function tools (examples)
 
-    - **Send Microphone Audio**: `send_mic_audio_to_websocket` pulls audio data from `mic_queue`, encodes it in base64, and sends it via WebSocket in the `input_audio_buffer.append` format.
-    - **Receive Audio and Responses**: `receive_audio_from_websocket` listens for WebSocket messages from OpenAI, handling responses based on message `type`.
+- “What’s the weather in Dubai?” → triggers `get_weather` (demo data)
+- “Open notepad and write this down ...” → `write_notepad` (Windows)
+- “What do you see?” → `describe_camera_view` captures a frame and sends to vision model
+- “Wave hello” → `robot_wave_hello` logs a waving motion
+- “Start the opening ceremony” → `opening_ceremony_speech`
 
-  **Handle WebSocket Events and Message Types**
+### Troubleshooting
 
-  - In `receive_audio_from_websocket`, the following message types are processed:
-    - **`session.created`**: Indicates a successful session creation. This triggers `send_fc_session_update()` to configure session parameters, such as transcription and voice activity detection (VAD) settings.
-    - **`input_audio_buffer.speech_started`**: Indicates that the AI has detected speech in the audio input. This triggers:
-      - `clear_audio_buffer()` to remove any existing data in `audio_buffer`.
-      - `stop_audio_playback()` to halt the speaker stream, ensuring only new audio data is played.
-    - **`response.audio.delta`**: Contains audio data in the `delta` field, encoded in base64. This data is decoded and appended to `audio_buffer`, where `speaker_callback` can access it for real-time playback.
-    - **`response.audio.done`**: Marks the end of the AI's audio response, signaling that no further audio data for the current response will be received.
-    - **`response.function_call_arguments.done`**: Indicates the AI’s request for a function call. The `handle_function_call` function decodes the request arguments, performs the specified action (such as `get_weather`), and returns the result to the AI using `send_function_call_result()`.
+- Mic/device errors: ensure default mic is available and not in use.
+- No audio playback: check speakers and that `speaker_callback` is invoked (logs).
+- Camera unavailable: the app continues without vision.
+- Socket stalls: reconnect logic and heartbeat should recover; check network/firewall.
 
-  **Send Session Configuration Updates**
+### Notes
 
-  - `send_fc_session_update()` configures specific session parameters, such as the AI's tone, speaking speed, language, and audio format. This ensures the WebSocket session maintains the desired interaction behavior and settings.
-
-  **Keep Audio Streams Active**
-
-  - The main loop continuously checks the activity status of both audio streams (`mic_stream` and `speaker_stream`). It uses `is_active()` to confirm both are running, with a 0.1-second pause in each loop cycle to conserve resources.
-
-  **Exception Handling and Interrupt Monitoring**
-
-  - If a `KeyboardInterrupt` is detected, `stop_event` is set, safely signaling all threads to terminate audio streaming and WebSocket communication.
-
-  **Shutdown and Release Resources**
-
-  - The `finally` block handles stream closure and WebSocket disconnection. `mic_stream` and `speaker_stream` are stopped and closed via `stop_stream()` and `close()`, while `p.terminate()` releases the `PyAudio` resources.
+- Vision uses `gpt-4o-mini` for lower cost; adjust in `realtime.py` if needed.
+- Notepad tool is Windows-centric; adapt for Linux/macOS by editing `write_notepad`.
