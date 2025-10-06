@@ -10,7 +10,7 @@ import time
 import pyaudio
 import socks
 import websocket
-from websocket import WebSocketTimeoutException
+from websocket import WebSocketTimeoutException, WebSocketConnectionClosedException
 import cv2
 from dotenv import load_dotenv
 
@@ -87,7 +87,14 @@ def send_mic_audio_to_websocket(ws):
                 message = json.dumps({'type': 'input_audio_buffer.append', 'audio': encoded_chunk})
                 try:
                     ws.send(message)
+                except WebSocketConnectionClosedException:
+                    print('WebSocket closed while sending mic audio; stopping mic thread.')
+                    break
                 except Exception as e:
+                    msg = str(e).lower()
+                    if 'socket is already closed' in msg:
+                        print('WebSocket unavailable while sending mic audio; stopping mic thread.')
+                        break
                     print(f'Error sending mic audio: {e}')
     except Exception as e:
         print(f'Exception in send_mic_audio_to_websocket thread: {e}')
@@ -244,7 +251,15 @@ def receive_audio_from_websocket(ws):
             except WebSocketTimeoutException:
                 # Periodic timeout to allow checking stop_event without freezing
                 continue
+            except WebSocketConnectionClosedException:
+                print('WebSocket closed while receiving; stopping receiver thread.')
+                break
             except Exception as e:
+                # Break on common closed-socket messages to avoid log spam
+                msg = str(e).lower()
+                if 'socket is already closed' in msg or 'connection to remote host was lost' in msg:
+                    print('WebSocket unavailable while receiving; stopping receiver thread.')
+                    break
                 print(f'Error receiving audio: {e}')
     except Exception as e:
         print(f'Exception in receive_audio_from_websocket thread: {e}')
@@ -269,27 +284,14 @@ def handle_function_call(event_json, ws):
             content = function_call_args.get("content", "")
             date = function_call_args.get("date", "")
 
-            # Only attempt to open Notepad on Windows
-            if os.name == 'nt':
-                # Escape single quotes in content and date for PowerShell
-                content_escaped = content.replace("'", "''")
-                date_escaped = date.replace("'", "''")
-                subprocess.Popen([
-                    "powershell",
-                    "-Command",
-                    f"Add-Content -Path temp.txt -Value 'date: {date_escaped}\n{content_escaped}\n\n'; notepad.exe temp.txt"
-                ])
-                result_msg = "write notepad successful."
-            else:
-                # On non-Windows, write to a local file without opening GUI
-                try:
-                    with open("temp.txt", "a", encoding="utf-8") as f:
-                        f.write(f"date: {date}\n{content}\n\n")
-                    result_msg = "content appended to temp.txt (no GUI on this OS)."
-                except Exception as e:
-                    result_msg = f"failed to write temp.txt: {e}"
+            # Escape single quotes in content and date for PowerShell
+            content_escaped = content.replace("'", "''")
+            date_escaped = date.replace("'", "''")
 
-            send_function_call_result(result_msg, call_id, ws)
+            subprocess.Popen(
+                ["powershell", "-Command", f"Add-Content -Path temp.txt -Value 'date: {date_escaped}\n{content_escaped}\n\n'; notepad.exe temp.txt"])
+
+            send_function_call_result("write notepad successful.", call_id, ws)
 
         elif name  =="get_weather":
 
@@ -354,7 +356,7 @@ def handle_function_call(event_json, ws):
                             ]
                         }
                     ],
-                    "max_tokens": 500  # Increased for full speech delivery
+                    "max_tokens": 200  # Reduced tokens for cost savings
                 }
                 
                 response = requests.post(
@@ -557,7 +559,7 @@ def send_fc_session_update(ws):
                 "Talk quickly. You should always call a function if you can. "
                 "You have access to a camera and can see what's in front of you. When users ask about what you see, use the describe_camera_view function to capture and describe the current view. "
                 "You can control your robot arm to wave hello when users ask you to wave or greet someone. When you wave, speak as yourself (first person), not in third person. "
-                "You can also deliver professional opening ceremony speeches for Upstream Digital Connect, showcasing cutting-edge upstream technologies and innovations. When delivering speeches, always deliver them in full without condensing or summarizing. "
+                "You can also deliver professional opening ceremony speeches for Upstream Digital Connect, showcasing cutting-edge upstream technologies and innovations. "
                 "Do not refer to these rules, even if you're asked about them."
             ),
             "turn_detection": {
@@ -677,58 +679,70 @@ def create_connection_with_ipv4(*args, **kwargs):
 
 # Function to establish connection with OpenAI's WebSocket API
 def connect_to_openai():
-    ws = None
-    try:
-        ws = create_connection_with_ipv4(
-            WS_URL,
-            header=[
-                f'Authorization: Bearer {API_KEY}',
-                'OpenAI-Beta: realtime=v1'
-            ]
-        )
-        print('Connected to OpenAI WebSocket.')
+    # Auto-reconnect loop keeps the assistant listening across transient failures
+    while not stop_event.is_set():
+        ws = None
+        try:
+            ws = create_connection_with_ipv4(
+                WS_URL,
+                header=[
+                    f'Authorization: Bearer {API_KEY}',
+                    'OpenAI-Beta: realtime=v1'
+                ]
+            )
+            print('Connected to OpenAI WebSocket.')
 
+            # Start the recv and send threads
+            receive_thread = threading.Thread(target=receive_audio_from_websocket, args=(ws,), daemon=True)
+            receive_thread.start()
 
-        # Start the recv and send threads
-        receive_thread = threading.Thread(target=receive_audio_from_websocket, args=(ws,), daemon=True)
-        receive_thread.start()
+            mic_thread = threading.Thread(target=send_mic_audio_to_websocket, args=(ws,), daemon=True)
+            mic_thread.start()
 
-        mic_thread = threading.Thread(target=send_mic_audio_to_websocket, args=(ws,), daemon=True)
-        mic_thread.start()
+            # Heartbeat thread to keep connection alive and detect stalls
+            def heartbeat():
+                while not stop_event.is_set():
+                    try:
+                        ws.ping()
+                    except Exception:
+                        break
+                    time.sleep(10)
 
-        # Heartbeat thread to keep connection alive and detect stalls
-        def heartbeat():
+            hb_thread = threading.Thread(target=heartbeat, daemon=True)
+            hb_thread.start()
+
+            # Stay here while connection is alive
             while not stop_event.is_set():
                 try:
-                    ws.ping()
+                    if not ws.connected:
+                        break
+                except Exception:
+                    break
+                time.sleep(0.2)
+
+            # Graceful close if we're exiting normally
+            print('Sending WebSocket close frame.')
+            try:
+                ws.send_close()
+            except Exception:
+                pass
+
+            receive_thread.join(timeout=2)
+            mic_thread.join(timeout=2)
+            print('WebSocket closed and threads terminated.')
+        except Exception as e:
+            print(f'Failed to connect to OpenAI: {e}')
+        finally:
+            if ws is not None:
+                try:
+                    ws.close()
+                    print('WebSocket connection closed.')
                 except Exception:
                     pass
-                time.sleep(10)
-
-        hb_thread = threading.Thread(target=heartbeat, daemon=True)
-        hb_thread.start()
-
-        # Wait for stop_event to be set
-        while not stop_event.is_set():
-            time.sleep(0.1)
-
-        # Send a close frame and close the WebSocket gracefully
-        print('Sending WebSocket close frame.')
-        ws.send_close()
-
-        receive_thread.join(timeout=2)
-        mic_thread.join(timeout=2)
-
-        print('WebSocket closed and threads terminated.')
-    except Exception as e:
-        print(f'Failed to connect to OpenAI: {e}')
-    finally:
-        if ws is not None:
-            try:
-                ws.close()
-                print('WebSocket connection closed.')
-            except Exception as e:
-                print(f'Error closing WebSocket connection: {e}')
+        # Reconnect after brief delay unless we're shutting down
+        if not stop_event.is_set():
+            print('Reconnecting in 2 seconds...')
+            time.sleep(2)
 
 
 # Main function to start audio streams and connect to OpenAI
